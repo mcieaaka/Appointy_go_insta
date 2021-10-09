@@ -1,58 +1,147 @@
 package main
 
 import (
-
-	// "log"
+	"context"
+	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/gorilla/mux"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-//================================================================
-//MODELS
-//================================================================
-
-//Users Struct
-type users struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
+//==============================
+//Models
+//==============================
+type User struct {
+	id       primitive.ObjectID `json:"_id,omitempty" bson:"_id",omitempty`
+	name     string             `json:"name" bson:"name"`
+	email    string             `json:"email" bson:"email"`
+	password string             `json:"password" bson:"password"`
 }
 
-//Post Struct
-type posts struct {
-	ID        string    `json:"id"`
-	Caption   string    `json:"caption"`
-	ImageUrl  string    `json:"image"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
-var u = []users{
-	{ID: "1", Name: "Harshit", Email: "harshit0300@gmail.com", Password: "ABCDEF"},
+type Post struct {
+	id        primitive.ObjectID `json:"_id,omitempty" bson:"_id",omitempty`
+	Caption   string             `json:"Caption" bson:"Caption"`
+	ImageUrl  string             `json:"ImageUrl" bson:"ImageURL"`
+	Timestamp time.Time          `json:"timestamp" bson:"timestamp"`
+	UserID    string             `json:"UserID" bson:"UserID"`
 }
 
 //===============================
 //MAIN Router and Config
 //===============================
+
+var client *mongo.Client
+
 func main() {
-	router := gin.Default()
-	router.GET("/", getHome)
-	router.GET("/user/{id}", getUsers)
 
-	router.Run("localhost:8080")
+	//MONGO CONFIG
+	ctx, _ := context.WithTimeout(context.Background(), 10*time.Second)
+	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
+	client, _ = mongo.Connect(ctx, clientOptions)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/users", createUserEndpoint).Methods("POST")
+	router.HandleFunc("/users/{id}", getUserEndpoint).Methods("GET")
+	router.HandleFunc("/posts", createPostEndpoint).Methods("POST")
+	router.HandleFunc("/posts/{id}", getPostEndpoint).Methods("GET")
+	router.HandleFunc("/posts/users/{id}", getuserposts).Methods("GET")
+
+	error := http.ListenAndServe(":8000", nil) // set listen port
+	if error != nil {
+		log.Fatal("ListenAndServe: ", error)
+	}
 }
 
 //==============================
-//Route Functions
+//ENDPOINTS FOR ROUTES
 //==============================
 
-//HOME
-func getHome(c *gin.Context) {
-	c.IndentedJSON(http.StatusOK, "Hello")
+//CREATE USER
+func createUserEndpoint(res http.ResponseWriter, req *http.Request) {
+	res.Header().Set("Content-Type", "application/json")
+	var user User
+	_ = json.NewDecoder(req.Body).Decode(&user)
+	collection := client.Database("go-api").Collection("users")
+	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
+	result, _ := collection.InsertOne(ctx, user)
+	json.NewEncoder(res).Encode(result)
 }
 
-func getUsers(c *gin.Context) {
-	c.IndentedJSON(http.StatusOK, u)
+//GET USER
+func getUserEndpoint(res http.ResponseWriter, req *http.Request) {
+	res.Header().Set("Content-Type", "application/json")
+	params := mux.Vars(req)
+	var u User
+	id, _ := primitive.ObjectIDFromHex(params["id"])
+	collection := client.Database("go-api").Collection("users")
+	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+	err := collection.FindOne(ctx, User{id: id}).Decode(&u)
+	if err != nil {
+		res.WriteHeader(http.StatusInternalServerError)
+		res.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+	json.NewEncoder(res).Encode(u)
+}
+
+//CREATE A POST
+func createPostEndpoint(res http.ResponseWriter, req *http.Request) {
+	res.Header().Set("Content-Type", "application/json")
+	var p Post
+	_ = json.NewDecoder(req.Body).Decode(&p)
+	p.Timestamp = time.Now()
+	collection := client.Database("go-api").Collection("posts")
+	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
+	result, _ := collection.InsertOne(ctx, p)
+	json.NewEncoder(res).Encode(result)
+}
+
+//GET A POST
+func getPostEndpoint(res http.ResponseWriter, req *http.Request) {
+	res.Header().Set("Content-Type", "application/json")
+	params := mux.Vars(req)
+	var p Post
+	id, _ := primitive.ObjectIDFromHex(params["id"])
+	collection := client.Database("go-api").Collection("posts")
+	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+	err := collection.FindOne(ctx, Post{id: id}).Decode(&p)
+	if err != nil {
+		res.WriteHeader(http.StatusInternalServerError)
+		res.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+	json.NewEncoder(res).Encode(p)
+}
+
+//GET ALL POSTS OF A USER
+func getuserposts(res http.ResponseWriter, req *http.Request) {
+	res.Header().Set("Content-Type", "application/json")
+	params := mux.Vars(req)
+	var mps []Post
+	id, _ := params["id"]
+	collection := client.Database("go-api").Collection("posts")
+	ctx, _ := context.WithTimeout(context.Background(), 30*time.Second)
+	cursor, err := collection.Find(ctx, Post{UserID: id})
+	if err != nil {
+		res.WriteHeader(http.StatusInternalServerError)
+		res.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+	defer cursor.Close(ctx)
+	for cursor.Next(ctx) {
+		var p Post
+		cursor.Decode(&p)
+		mps = append(mps, p)
+	}
+	if err := cursor.Err(); err != nil {
+		res.WriteHeader(http.StatusInternalServerError)
+		res.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+	json.NewEncoder(res).Encode(mps)
 }
